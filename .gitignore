@@ -1,4 +1,6 @@
 **/__pycache__
 runs/
 .vscode/
-
+flagged/
+vis_output/
+.cache/
