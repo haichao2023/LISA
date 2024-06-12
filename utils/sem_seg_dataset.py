@@ -14,7 +14,7 @@ from transformers import CLIPImageProcessor
 from model.llava import conversation as conversation_lib
 from model.segment_anything.utils.transforms import ResizeLongestSide
 
-from .utils import ANSWER_LIST, SHORT_QUESTION_LIST
+from .utils import ANSWER_LIST, SHORT_QUESTION_LIST, REJECT_LIST
 
 
 def init_mapillary(base_image_dir):
@@ -34,6 +34,33 @@ def init_mapillary(base_image_dir):
     ]
     print("mapillary: ", len(mapillary_images))
     return mapillary_classes, mapillary_images, mapillary_labels
+
+
+def init_anomaly(base_image_dir, stage):
+    anomaly_classes = np.array(["anomaly",])
+    image_ids = sorted(
+        os.listdir(os.path.join(base_image_dir, "anomaly/images", stage))
+    )
+    anomaly_image_ids = []
+    for x in image_ids:
+        if x.endswith(".jpg"):
+            anomaly_image_ids.append(x[:-4])
+    anomaly_images = []
+    for image_id in anomaly_image_ids: 
+        anomaly_images.append(
+            os.path.join(
+                base_image_dir,
+                "anomaly",
+                "images",
+                stage,
+                "{}.jpg".format(image_id),
+            )
+        )
+    anomaly_labels = [
+        x.replace("images", "labels")
+        for x in anomaly_images
+    ]
+    return anomaly_classes, anomaly_images, anomaly_labels
 
 
 def init_ade20k(base_image_dir):
@@ -122,6 +149,144 @@ def init_pascal_part(base_image_dir):
     img_ids = coco_api_pascal_part.getImgIds()
     print("pascal_part: ", len(img_ids))
     return class_map_pascal_part, img_ids, coco_api_pascal_part
+
+
+class AnomalyDataset(torch.utils.data.Dataset):
+    pixel_mean = torch.Tensor([123.675, 116.28, 103.53]).view(-1, 1, 1)
+    pixel_std = torch.Tensor([58.395, 57.12, 57.375]).view(-1, 1, 1)
+    img_size = 1024
+    ignore_label = 255
+
+    def __init__(
+        self,
+        base_image_dir,
+        tokenizer,
+        vision_tower,
+        samples_per_epoch=500 * 8 * 2 * 10,
+        precision: str = "fp32",
+        image_size: int = 224,
+        num_classes_per_sample: int = 3,
+        stage="train",
+    ):
+        """
+            该数据集与LISA原始训练的数据集不同，LISA原来训练的数据集，每个case必定会有个对应的前景mask；
+            而这里的anomaly数据集，有些case是正常的，没有anomaly，也就是没有前景mask；
+            
+            diff:
+                self.reject_list
+        """
+        self.samples_per_epoch = samples_per_epoch
+        self.num_classes_per_sample = num_classes_per_sample
+
+        self.base_image_dir = base_image_dir
+        self.image_size = image_size
+        self.tokenizer = tokenizer
+        self.precision = precision
+        self.transform = ResizeLongestSide(image_size)
+        self.clip_image_processor = CLIPImageProcessor.from_pretrained(vision_tower)
+
+        self.short_question_list = SHORT_QUESTION_LIST
+        self.answer_list = ANSWER_LIST
+        self.reject_list = REJECT_LIST
+
+        self.anomaly_classes, self.anomaly_images, self.anomaly_labels = init_anomaly(
+            base_image_dir, stage
+        )
+        self.stage = stage
+
+    def __len__(self):
+        # 训练采用随机有放回采样，测试采用顺序采样
+        return self.samples_per_epoch if self.stage == "train" else len(self.anomaly_images)
+
+    def preprocess(self, x: torch.Tensor) -> torch.Tensor:
+        """Normalize pixel values and pad to a square input."""
+        # Normalize colors
+        x = (x - self.pixel_mean) / self.pixel_std
+
+        # Pad
+        h, w = x.shape[-2:]
+        padh = self.img_size - h
+        padw = self.img_size - w
+        x = F.pad(x, (0, padw, 0, padh))
+        return x
+
+    def __getitem__(self, idx):
+        # 依照SemSegDataset修改的，逻辑上有些冗余
+        image, labels = self.anomaly_images, self.anomaly_labels
+        idx = random.randint(0, len(image) - 1) if self.stage == "train" else idx
+        image_path = image[idx]
+        label_path = labels[idx]
+        label = Image.open(label_path)
+        label = np.array(label)
+        label[label == 0] = 255
+        label -= 1
+        label[label == 254] = 255
+
+        img = cv2.imread(image_path)
+        image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        ori_size = image.shape[:2]
+        # preprocess image for clip
+        image_clip = self.clip_image_processor.preprocess(
+            image, return_tensors="pt"
+        )["pixel_values"][0]
+        image = self.transform.apply_image(image)  # preprocess image for sam
+        resize = image.shape[:2]
+        unique_label = np.unique(label).tolist()
+        if 255 in unique_label:
+            unique_label.remove(255)
+        normal = True
+        if len(unique_label) > 0:
+            normal = False
+
+        sampled_classes = self.anomaly_classes.tolist()
+
+        questions = []
+        answers = []
+        class_ids = []
+        for sampled_cls in sampled_classes:
+            text = sampled_cls
+
+            assert len(text.split("||")) == 1
+            question_template = random.choice(self.short_question_list)
+            questions.append(question_template.format(class_name=text.lower()))
+
+            ans = random.choice(self.answer_list) if not normal else random.choice(self.reject_list)
+            answers.append(ans)
+
+            class_id = self.anomaly_classes.tolist().index(sampled_cls)
+            class_ids.append(class_id)
+
+        conversations = []
+        conv = conversation_lib.default_conversation.copy()
+
+        i = 0
+        while i < len(questions):
+            conv.messages = []
+            conv.append_message(conv.roles[0], questions[i])
+            conv.append_message(conv.roles[1], answers[i])
+            conversations.append(conv.get_prompt())
+            i += 1
+
+        image = self.preprocess(torch.from_numpy(image).permute(2, 0, 1).contiguous())
+        label = torch.from_numpy(label).long()
+        if normal:
+            masks = torch.rand(0, *ori_size)
+        else:
+            masks = [label == 0]
+            masks = torch.stack(masks, dim=0)
+
+        return (
+            image_path,
+            image,
+            image_clip,
+            conversations,
+            masks,
+            label,
+            resize,
+            questions,
+            sampled_classes,
+            self.stage == 'val',
+        )
 
 
 class SemSegDataset(torch.utils.data.Dataset):

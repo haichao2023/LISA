@@ -74,7 +74,8 @@ class LisaMetaModel:
             self.vision_pretrained = kwargs.get("vision_pretrained", None)
         else:
             self.vision_pretrained = kwargs.get("vision_pretrained", None)
-            self.initialize_lisa_modules(self.config)
+            # self.initialize_lisa_modules(self.config) 
+        self.initialize_lisa_modules(self.config)  # 这个按道理应该在if的外层，需要初始化SAM模型
 
     def initialize_lisa_modules(self, config):
         # SAM
@@ -126,7 +127,9 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         config,
         **kwargs,
     ):
-        if not hasattr(config, "train_mask_decoder"):
+        # 感觉原代码中取反是bug
+        # if not hasattr(config, "train_mask_decoder"):
+        if hasattr(config, "train_mask_decoder"):
             config.mm_use_im_start_end = kwargs.pop("use_mm_start_end", True)
             config.mm_vision_tower = kwargs.get(
                 "vision_tower", "openai/clip-vit-large-patch14"

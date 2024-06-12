@@ -41,6 +41,17 @@ ANSWER_LIST = [
     "[SEG].",
 ]
 
+# 存在正常路面的图片，即没有异常mask
+REJECT_LIST = [
+    "I cannot do it.",
+    "I cannot do it. Please ask another question.",
+    "Sorry, there is no {class_name} in the image.",
+    "Sorry, I cannot do it.",
+    "Sorry, I cannot do it. Please ask another question.",
+]
+
+
+
 
 class Summary(Enum):
     NONE = 0
