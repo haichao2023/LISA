@@ -3,4 +3,12 @@ deepspeed --master_port=24999 train_ft.py \
   --dataset_dir='./dataset' \
   --precision bf16 \
   --batch_size 1 \
-  --exp_name="lisa-7b"
+  --exp_name="lisa-7b-v1" \
+  --lr 1e-5 \
+  --grad_accumulation_steps 16 \
+  --epochs 20 \
+  --steps_per_epoch 500 \
+  --print_freq 10 \
+  --ce_loss_weight 1.0 \
+  --dice_loss_weight 1.0 \
+  --bce_loss_weight 1.0

@@ -12,6 +12,7 @@ import tqdm
 import transformers
 from peft import LoraConfig, get_peft_model
 from torch.utils.tensorboard import SummaryWriter
+from PIL import Image
 
 from model.LISA import LISAForCausalLM
 from model.llava import conversation as conversation_lib
@@ -41,12 +42,6 @@ def parse_args(args):
     parser.add_argument("--lora_r", default=8, type=int)
     parser.add_argument(
         "--vision-tower", default="openai/clip-vit-large-patch14", type=str
-    )
-    parser.add_argument("--load_in_8bit", action="store_true", default=False)
-    parser.add_argument("--load_in_4bit", action="store_true", default=False)
-
-    parser.add_argument(
-        "--dataset", default="sem_seg||refer_seg||vqa||reason_seg", type=str
     )
     parser.add_argument("--dataset_dir", default="./dataset", type=str)
     parser.add_argument("--log_base_dir", default="./runs", type=str)
@@ -85,7 +80,7 @@ def parse_args(args):
     parser.add_argument("--gradient_checkpointing", action="store_true", default=True)
     parser.add_argument("--train_mask_decoder", action="store_true", default=True)
     parser.add_argument("--use_mm_start_end", action="store_true", default=True)
-    parser.add_argument("--auto_resume", action="store_true", default=True)
+    parser.add_argument("--auto_resume", action="store_true", default=False)
     parser.add_argument(
         "--conv_type",
         default="llava_v1",
@@ -120,6 +115,12 @@ def main(args):
         tokenizer.add_tokens(
             [DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True
         )
+
+    # visualize
+    vis_dir = os.path.join(args.log_base_dir, args.exp_name, "vis_output")
+    if not os.path.exists(vis_dir):
+        os.makedirs(vis_dir)
+    args.vis_save_path = vis_dir
 
     model_args = {
         "train_mask_decoder": args.train_mask_decoder,
@@ -419,7 +420,8 @@ def train(
     # switch to train mode
     model.train()
     end = time.time()
-    for global_step in range(args.steps_per_epoch):
+    for step in range(args.steps_per_epoch):
+        global_step = epoch * args.steps_per_epoch + step
         for i in range(args.grad_accumulation_steps):
             try:
                 input_dict = next(train_iter)
@@ -510,10 +512,15 @@ def validate(val_loader, model_engine, epoch, writer, args):
     union_meter = AverageMeter("Union", ":6.3f", Summary.SUM)
     acc_iou_meter = AverageMeter("gIoU", ":6.3f", Summary.SUM)
 
+    # visualize
+    vis_dir = os.path.join(args.vis_save_path, "epoch_{}".format(epoch))
+    if not os.path.exists(vis_dir):
+        os.makedirs(vis_dir)
+
     model_engine.eval()
 
     num_normal = 0
-    for input_dict in tqdm.tqdm(val_loader):
+    for i, input_dict in tqdm.tqdm(enumerate(val_loader)):
         if input_dict['masks_list'][0].shape[0] == 0:  # 不存在异常，直接continue，不然计算iou会报错
             num_normal += 1
             continue
@@ -537,6 +544,25 @@ def validate(val_loader, model_engine, epoch, writer, args):
         masks_list = output_dict["gt_masks"][0].int()
         output_list = (pred_masks[0] > 0).int()
         assert len(pred_masks) == 1
+
+
+        # visualize
+        if i % 5 == 0:
+            img_path = input_dict["image_paths"][0]
+            img = np.array(Image.open(img_path))
+            gt_mask = masks_list[0].cpu().numpy().astype(bool)
+            pred_mask = output_list[0].cpu().numpy().astype(bool)
+
+            gt = img.copy()
+            gt[gt_mask] = (gt * 0.5 + gt_mask[:, :, None].astype(np.uint8)
+                        * np.array([255, 0, 0]) * 0.5)[gt_mask]
+            pred = img.copy()
+            pred[pred_mask] = (pred * 0.5 + pred_mask[:, :, None].astype(np.uint8)
+                                * np.array([255, 0, 0]) * 0.5)[pred_mask]
+            save_img = np.concatenate([img, gt, pred], axis=1)
+            save_path = os.path.join(vis_dir, os.path.basename(img_path))
+            Image.fromarray(save_img).save(save_path)
+
 
         intersection, union, acc_iou = 0.0, 0.0, 0.0
         for mask_i, output_i in zip(masks_list, output_list):
@@ -562,8 +588,9 @@ def validate(val_loader, model_engine, epoch, writer, args):
     giou = acc_iou_meter.avg[1]
 
     if args.local_rank == 0:
-        writer.add_scalar("val/giou", giou, epoch)
-        writer.add_scalar("val/ciou", ciou, epoch)
+        if not args.eval_only:
+            writer.add_scalar("val/giou", giou, epoch)
+            writer.add_scalar("val/ciou", ciou, epoch)
         print("giou: {:.4f}, ciou: {:.4f}".format(giou, ciou))
         print("num_normal: ", num_normal)
 

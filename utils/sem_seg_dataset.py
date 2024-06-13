@@ -251,7 +251,7 @@ class AnomalyDataset(torch.utils.data.Dataset):
             questions.append(question_template.format(class_name=text.lower()))
 
             ans = random.choice(self.answer_list) if not normal else random.choice(self.reject_list)
-            answers.append(ans)
+            answers.append(ans.format(class_name=text.lower()))
 
             class_id = self.anomaly_classes.tolist().index(sampled_cls)
             class_ids.append(class_id)

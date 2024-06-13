@@ -144,7 +144,7 @@ def main(args):
     model.resize_token_embeddings(len(tokenizer))
 
     state_dict = torch.load(args.weight, map_location="cpu")
-    model.load_state_dict(state_dict, strict=True)
+    model.load_state_dict(state_dict, strict=False)
 
     model = model.merge_and_unload()
     state_dict = {}
